@@ -1,61 +1,86 @@
 #!/usr/bin/env bash
 #
-# install_docker_and_k8s.sh
+# install_docker_k8s_flannel.sh
 #
-# This script performs:
-#   1. System update & upgrade
-#   2. Docker installation and startup
-#   3. Configuration of the new Kubernetes apt repo at pkgs.k8s.io
-#   4. Installation of kubelet, kubeadm, and kubectl
-#
-# Tested on Ubuntu 24.04 (codename Noble), where apt.kubernetes.io is not supported.
+# Steps:
+#   1. Update & upgrade the system
+#   2. Disable swap
+#   3. Install Docker & enable the service
+#   4. Add the official Kubernetes apt repo from pkgs.k8s.io
+#   5. Install kubeadm, kubelet, and kubectl
+#   6. Initialize the cluster (control-plane node) with kubeadm
+#   7. Copy kubeconfig to your home directory for kubectl usage
+#   8. (Optional) Ask if you want to install Flannel CNI
 #
 # Usage:
-#   chmod +x install_docker_and_k8s.sh
-#   sudo ./install_docker_and_k8s.sh
+#   chmod +x install_docker_k8s_flannel.sh
+#   sudo ./install_docker_k8s_flannel.sh
+#
 
 set -e
 
-echo "=== [1/4] Updating and upgrading Ubuntu packages... ==="
+echo "=== [1/8] Updating and upgrading Ubuntu packages... ==="
 sudo apt update
 sudo apt -y upgrade
 
-echo "=== [2/4] Installing Docker... ==="
+echo "=== [2/8] Disabling swap... ==="
+sudo swapoff -a
+sudo sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
+
+echo "=== [3/8] Installing Docker... ==="
 sudo apt -y install docker.io
 
 echo "=== Enabling and starting Docker... ==="
 sudo systemctl enable docker
 sudo systemctl start docker
 
-# Optional: Verify Docker status
 echo "=== Docker status ==="
-sudo systemctl status docker --no-pager
-
+sudo systemctl status docker --no-pager || true
 echo "=== Docker version ==="
-docker --version
+docker --version || true
 
-echo "=== [3/4] Adding the official Kubernetes repository from pkgs.k8s.io... ==="
-# Create the directory for apt keyrings if it doesn't exist
+echo "=== [4/8] Adding the official Kubernetes repository from pkgs.k8s.io... ==="
 sudo mkdir -p /etc/apt/keyrings
 
-# Add the Kubernetes repository line (example: v1.32 channel)
-echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] \
-https://pkgs.k8s.io/core:/stable:/v1.32/deb/ /" | sudo tee /etc/apt/sources.list.d/kubernetes.list
+# Example: v1.32 channel (change as desired)
+sudo tee /etc/apt/sources.list.d/kubernetes.list >/dev/null <<EOF
+deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.32/deb/ /
+EOF
 
-# Import the Kubernetes GPG key
+# Import the GPG key
 curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.32/deb/Release.key \
   | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
 
-echo "=== [4/4] Installing kubeadm, kubelet, and kubectl... ==="
+echo "=== [5/8] Installing kubeadm, kubelet, and kubectl... ==="
 sudo apt-get update
 sudo apt-get install -y kubelet kubeadm kubectl
-
-# Hold the Kubernetes packages to avoid accidental upgrades
 sudo apt-mark hold kubelet kubeadm kubectl
 
-echo "=== Kubernetes tools installed ==="
-echo "Kubeadm version: $(kubeadm version -o short || true)"
-echo "Kubelet version: $(kubelet --version || true)"
-echo "Kubectl version: $(kubectl version --client --short || true)"
+echo "kubeadm:  $(kubeadm version -o short || true)"
+echo "kubelet:  $(kubelet --version || true)"
+echo "kubectl:  $(kubectl version --client --short || true)"
 
-echo "=== All steps completed successfully! ==="
+echo "=== [6/8] Initializing the cluster with kubeadm init ==="
+# Adjust the --pod-network-cidr if you want a different subnet for Flannel or another CNI
+sudo kubeadm init --pod-network-cidr=10.244.0.0/16
+
+echo "=== [7/8] Setting up kubeconfig for your user ==="
+mkdir -p $HOME/.kube
+sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+sudo chown $(id -u):$(id -g) $HOME/.kube/config
+
+echo "=== [8/8] (Optional) Installing Flannel CNI ==="
+read -rp "Do you want to install Flannel CNI now? [y/N]: " INSTALL_FLANNEL
+
+if [[ "$INSTALL_FLANNEL" =~ ^[Yy]$ ]]; then
+  echo "=== Installing Flannel CNI plugin... ==="
+  kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml
+  echo "Flannel installation command has been applied."
+else
+  echo "Skipping Flannel installation. You can manually install it later with:"
+  echo "  kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml"
+fi
+
+echo "=== Script completed successfully! ==="
+echo "If you installed Flannel, you can check node status with 'kubectl get nodes -o wide'."
+echo "Otherwise, remember to install a CNI plugin before scheduling pods."
